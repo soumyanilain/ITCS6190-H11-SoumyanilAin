@@ -94,9 +94,30 @@ def task1_pipelines():
 
     # full pipeline
     categorical, numeric = feature_columns(trainDF)
-    # TODO: indexer, encoder, assembler, LinearRegression; fit the Pipeline on trainDF;
-    #       results.append(evaluate("full", <predictions on testDF>)); save the model
-    return None
+    indexOutputCols = [c + "Index" for c in categorical]
+    oheOutputCols = [c + "OHE" for c in categorical]
+
+    # one StringIndexer and one OneHotEncoder handle all the string columns at once (slide 23);
+    # handleInvalid="skip" drops test rows whose category never appeared in training
+    stringIndexer = StringIndexer(inputCols=categorical, outputCols=indexOutputCols,
+                                  handleInvalid="skip")
+    oheEncoder = OneHotEncoder(inputCols=indexOutputCols, outputCols=oheOutputCols)
+    assembler = VectorAssembler(inputCols=oheOutputCols + numeric, outputCol="features")
+    lrFull = LinearRegression(featuresCol="features", labelCol="price")
+
+    # every stage inside the Pipeline, fitted on the training set only
+    full = Pipeline(stages=[stringIndexer, oheEncoder, assembler, lrFull]).fit(trainDF)
+    predDF = full.transform(testDF)
+    results.append(evaluate("full", predDF))
+    print(f"full pipeline: {len(categorical)} string + {len(numeric)} numeric columns, "
+          f"feature vector of {predDF.select('features').first()[0].size} doubles")
+    (predDF.select("neighbourhood_cleansed", "room_type", "bedrooms", "price",
+                   sround("prediction", 1).alias("prediction"))
+           .show(5, truncate=False))
+
+    full.write().overwrite().save(model_dir)
+    print(f"full PipelineModel saved to {model_dir}")
+    return results
 
 
 # ---------------------------------------------------------------- Task 2: score with the saved model
@@ -107,8 +128,23 @@ def task2_score():
     output/task2/predictions. Print the stage class names of the loaded model and the
     RMSE of its predictions. Return the DataFrame you wrote.
     """
-    # TODO
-    return None
+    # load the fitted pipeline: PipelineModel.load is a class method, no fit() anywhere here
+    model = PipelineModel.load(model_dir)
+    print("stages:", [type(s).__name__ for s in model.stages])
+
+    # only the test listings, as a scoring job would see new data
+    testDF = spark.read.parquet(f"{data_dir}/split/test")
+    predDF = model.transform(testDF)
+
+    outDF = predDF.select("neighbourhood_cleansed", "room_type", "bedrooms", "price",
+                          sround("prediction", 1).alias("prediction"))
+    outDF.coalesce(1).write.mode("overwrite").option("header", True).csv(f"{out_dir}/predictions")
+
+    rmse = rmse_eval.evaluate(predDF)
+    print(f"loaded model RMSE {rmse:.1f}")
+    print(f"{outDF.count()} predictions written for {testDF.count()} test rows")
+    outDF.show(5, truncate=False)
+    return outDF
 
 
 # ---------------------------------------------------------------- main
